@@ -10,10 +10,12 @@ use solana_transaction_status::UiConfirmedBlock;
 use solana_transaction_status::UiInstruction;
 use tokio;
 use anyhow::anyhow;
+use std::num::NonZeroU32;
+use std::num::NonZeroUsize;
 use std::sync::Arc;
 use std::pin::Pin;
 use std::future::Future;
-use std::sync::Mutex;
+// use std::sync::Mutex;
 use futures_util::StreamExt;
 use serde::{Serialize, Deserialize};
 use solana_client::rpc_response::RpcBlockUpdate;
@@ -27,6 +29,8 @@ use tokio::sync::mpsc;
 use tokio::sync::Notify;
 use time::OffsetDateTime;
 use tokio_util::sync::CancellationToken;
+use lru::LruCache;
+use tokio::sync::Mutex;
 
 use spl_token::instruction::TokenInstruction;
 
@@ -34,14 +38,16 @@ use solana_client::nonblocking::{pubsub_client::PubsubClient, rpc_client::RpcCli
 use solana_client::rpc_config::{RpcBlockSubscribeConfig, RpcBlockSubscribeFilter};
 use solana_sdk::commitment_config::CommitmentConfig;
 use solana_transaction_status::{EncodedConfirmedBlock, UiTransactionEncoding};
+use tokio::sync::RwLock;
 
 use clickhouse::{Client as ClickhouseClient, Row};
 use crate::instruction::Instruction;
 
-
+const BLOCKS_TABLE_CACHE_SIZE: usize = 10000;
+const BLOCKS_TABLE_QUERY_BATCH_SIZE: u64 = 1000;
 // const DEFAULT_MAX_RPC_REQUESTS_PER_SECOND: u32 = 60;
 
-#[derive(Row, Serialize, Deserialize, Debug)]
+#[derive(Row, Serialize, Deserialize, Debug, Clone)]
 pub struct BlocksRow {
     slot: u64,
     parent_slot: u64,
@@ -82,6 +88,7 @@ pub struct Indexer {
     pubsub: Arc<PubsubClient>,
     clickhouse: Arc<ClickhouseClient>,
     config: IndexerConfig,
+    // blocks_table_cache: Mutex<LruCache<u64, BlocksRow>>,
 }
 
 impl Indexer {
@@ -91,6 +98,7 @@ impl Indexer {
             pubsub: Arc::new(pubsub),
             clickhouse: Arc::new(clickhouse),
             config: IndexerConfig::default(),
+            // blocks_table_cache: Mutex::new(LruCache::new(NonZeroUsize::new(BLOCKS_TABLE_CACHE_SIZE).unwrap())),
         }
     }
 
@@ -99,9 +107,9 @@ impl Indexer {
         Ok(())
     }
 
-    async fn backtrack_from_slot(&'static self, ref_slot: u64, cutoff_slot: u64, until_blockhash_match: Option<bool>, stop_rx: watch::Receiver<()>) -> Result<(), anyhow::Error> {
+    async fn backtrack_from_slot(&'static self, initial_slot: u64, cutoff_slot: u64, until_blockhash_match: Option<bool>, stop_rx: watch::Receiver<()>) -> Result<(), anyhow::Error> {
         // The reference block is defined so that we know it is present in the database, as we extend to extend from it
-        let mut ref_block: BlocksRow = match self.query_slot_on_database(ref_slot).await? {
+        let mut ref_block: BlocksRow = match self.query_slot_on_database(initial_slot).await? {
             Some(block) => block,
             None => return Err(anyhow!("Cannot backtrack with no reference block to start from within the database")),
         };
@@ -116,7 +124,6 @@ impl Indexer {
                 println!("Ending backtrack because of cutoff_slot");
             }
 
-            let parent_block = self.get_block_from_rpc(ref_block.parent_slot).await.unwrap();
             match self.query_slot_on_database(ref_block.parent_slot).await? {
                 Some(parent_block_on_database) => {
                     println!("{}", parent_block_on_database.slot);
@@ -134,15 +141,14 @@ impl Indexer {
                 None => ()
             }
 
-            // Inserted block in the database and update reference block
+            // Fetch parent block from RPC
+            let parent_block = self.get_block_from_rpc(ref_block.parent_slot).await.unwrap();
+            // Process block and insert changes in the database
             self.process_block(ref_block.parent_slot, &parent_block).await.unwrap();
+            // Update the reference block
             ref_block = BlocksRow::from_confirmed_block(ref_block.parent_slot, &parent_block)?;
             println!("New reference block {:#?}", ref_block);
         }
-        Ok(())
-    }
-
-    pub async fn check_database_integrity(&'static self) -> Result<(), anyhow::Error> {
         Ok(())
     }
 
@@ -186,10 +192,7 @@ impl Indexer {
             previous_blockhash: block.previous_blockhash.clone(),
             block_time: OffsetDateTime::from_unix_timestamp(block.block_time.unwrap())?,
         };
-        let mut insert_blocks = self.clickhouse.insert("blocks")?;
-        insert_blocks.write(&row).await?;
-        insert_blocks.end().await?;
-        println!("Inserted slot {} into the database", slot);
+        self.insert_slot_in_database(row).await?;
 
         let mut rows = Vec::new();
         for (index, transaction) in block.transactions.as_ref().unwrap().iter().enumerate() {
@@ -201,12 +204,12 @@ impl Indexer {
             match row {
                 IndexerRow::SplTokenTransfer(spl_token_transfer_row) => {
                     insert_spl_token_transfers.write(&spl_token_transfer_row).await?;
-                    println!("Inserting transfer row");
                 }
                 _ => (),
             }
         }
         insert_spl_token_transfers.end().await?;
+        println!("Inserted transfer rows");
 
         Ok(())
     }
@@ -229,19 +232,48 @@ impl Indexer {
         Ok(self.rpc.get_block_with_config(slot, config).await?)
     }
 
-    async fn query_slot_on_database(&self, slot: u64) -> Result<Option<BlocksRow>, anyhow::Error> {
-        let mut cursor = self.clickhouse.query("SELECT * FROM blocks WHERE slot = ?").bind(slot).fetch::<BlocksRow>()?;
-        Ok(cursor.next().await?)
+    async fn query_slot_on_database(&'static self, slot: u64) -> Result<Option<BlocksRow>, anyhow::Error> {
+        Ok(self.clickhouse.query("SELECT * FROM blocks WHERE slot = ?").bind(slot).fetch_optional::<BlocksRow>().await?)
+
+        // Batching client side implementation
+        // let mut cache = self.blocks_table_cache.lock().await;
+        // if let Some(row) = cache.get(&slot) {
+        //     println!("Returning slot from cache...");
+        //     return Ok(Some(row.clone()));
+        // }
+
+        // let rows = self.clickhouse.query("SELECT * FROM blocks WHERE slot > ? AND slot <= ?")
+        //     .bind(slot - BLOCKS_TABLE_QUERY_BATCH_SIZE / 2)
+        //     .bind(slot + BLOCKS_TABLE_QUERY_BATCH_SIZE / 2)
+        //     .fetch_all::<BlocksRow>().await?;
+
+        // let mut ret_row = None;
+        // for row in rows {
+        //     if row.slot == slot {
+        //         ret_row = Some(row.clone());
+        //     }
+        //     cache.put(row.slot, row);
+        // }
+        // println!("Returning slot from database...");
+        // Ok(ret_row)
     }
 
-    async fn delete_slot_on_database(&self, slot: u64) -> Result<(), anyhow::Error> {
+    async fn insert_slot_in_database(&'static self, row: BlocksRow) -> Result<(), anyhow::Error> {
+        // Inserting block row in database
+        let mut insert_blocks = self.clickhouse.insert("blocks")?;
+        insert_blocks.write(&row).await?;
+        insert_blocks.end().await?;
+        println!("Inserted slot {} into the database", row.slot);
+
+        // Updating cache
+        // self.blocks_table_cache.lock().await.put(row.slot, row);
+
         Ok(())
     }
 
-    pub async fn insert_blocks_row(&self, row: BlocksRow) {
-        let mut insert = self.clickhouse.insert("blocks").unwrap();
-        insert.write(&row).await.unwrap();
-    }
+    // async fn delete_slot_on_database(&self, slot: u64) -> Result<(), anyhow::Error> {
+    //     Ok(())
+    // }
 }
 
 #[derive(Serialize, Deserialize, Debug, Row)]

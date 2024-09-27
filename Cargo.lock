@@ -3383,6 +3383,7 @@ dependencies = [
  "clickhouse",
  "crossterm",
  "futures-util",
+ "lru",
  "ratatui",
  "serde",
  "solana-client",

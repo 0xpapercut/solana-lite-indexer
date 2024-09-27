@@ -19,6 +19,7 @@ chrono = "0.4.38"
 clickhouse = { version = "0.12.2", features = ["time"] }
 crossterm = "0.28.1"
 futures-util = "0.3.30"
+lru = "0.12.4"
 ratatui = "0.28.1"
 serde = "1.0.210"
 solana-client = "2.0.10"
