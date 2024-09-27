@@ -1,0 +1,30 @@
+[package]
+name = "solana-lite-indexer"
+version = "0.1.0"
+edition = "2021"
+default-run = "main"
+
+[[bin]]
+name = "main"  # This will use src/main.rs
+path = "src/main.rs"
+
+[[bin]]
+name = "simple"
+path = "bin/simple.rs"
+
+[dependencies]
+anyhow = "1.0.89"
+bs58 = "0.5.1"
+chrono = "0.4.38"
+clickhouse = { version = "0.12.2", features = ["time"] }
+crossterm = "0.28.1"
+futures-util = "0.3.30"
+ratatui = "0.28.1"
+serde = "1.0.210"
+solana-client = "2.0.10"
+solana-sdk = "2.0.10"
+solana-transaction-status = "2.0.10"
+spl-token = "6.0.0"
+time = "0.3.36"
+tokio = "1.40.0"
+tokio-util = "0.7.12"
