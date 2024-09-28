@@ -67,7 +67,6 @@ impl Indexer {
             Some(block) => block,
             None => return Err(anyhow!("Cannot backtrack with no reference block to start from within the database")),
         };
-        println!("Set reference block {:#?}", ref_block);
 
         loop {
             if stop_rx.has_changed().unwrap() {
@@ -97,14 +96,9 @@ impl Indexer {
 
             // Fetch parent block from RPC
             let parent_block = self.get_block_from_rpc(ref_block.parent_slot).await.unwrap();
-            // Process block and insert changes in the database
-            let mut table_rows = TableRows::default();
-            parse_block(&mut table_rows, &parent_block, ref_block.parent_slot)?;
-            table_rows.insert_into_database(&self.clickhouse).await?;
-            // self.process_block(ref_block.parent_slot, &parent_block).await?;
+            self.process_block(ref_block.parent_slot, &parent_block).await?;
             // Update the reference block
             ref_block = BlocksRow::from_confirmed_block(ref_block.parent_slot, &parent_block)?;
-            println!("New reference block {:#?}", ref_block);
         }
         Ok(())
     }
