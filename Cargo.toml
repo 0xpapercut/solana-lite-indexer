@@ -2,15 +2,6 @@
 name = "solana-lite-indexer"
 version = "0.1.0"
 edition = "2021"
-default-run = "main"
-
-[[bin]]
-name = "main"  # This will use src/main.rs
-path = "src/main.rs"
-
-[[bin]]
-name = "simple"
-path = "bin/simple.rs"
 
 [dependencies]
 anyhow = "1.0.89"
