@@ -15,4 +15,4 @@ Then, setup the following environment variables:
 Setup the database tables with `cargo run -- --setup-db`, and run the indexer with `cargo run`. Then, if you look at the clickhouse database, for example using Datagrip, you should see the rows being inserted in real time.
 
 ## Issues
-The biggest issue that this indexer does not deal with are chain reorgs. When it happens, we're supposed to backtrack from the head until the point of reorg, while updating or deleting rows that have been inserted into the database but are no longer part of the chain.
+This indexer does not deal with chain reorgs. When a reorg happens happens, we're supposed to backtrack from the head, while updating or deleting rows that have been inserted into the database but are no longer part of the chain, which is a little too involved for a toy project.
