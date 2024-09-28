@@ -185,31 +185,33 @@ impl Indexer {
     }
 
     pub async fn process_block(&'static self, slot: u64, block: &UiConfirmedBlock) -> Result<(), Error> {
-        let row = BlocksRow {
+        let blocks_row = BlocksRow {
             slot,
             parent_slot: block.parent_slot,
             blockhash: block.blockhash.clone(),
             previous_blockhash: block.previous_blockhash.clone(),
             block_time: OffsetDateTime::from_unix_timestamp(block.block_time.unwrap())?,
         };
-        self.insert_slot_in_database(row).await?;
 
         let mut rows = Vec::new();
+        rows.push(IndexerRow::Block(blocks_row));
         for (index, transaction) in block.transactions.as_ref().unwrap().iter().enumerate() {
             rows.extend(process_transaction(slot, transaction, index)?);
         }
 
         let mut insert_spl_token_transfers = self.clickhouse.insert("spl_token_transfers")?;
+        let mut insert_blocks = self.clickhouse.insert("spl_token_transfers")?;
         for row in rows {
             match row {
-                IndexerRow::SplTokenTransfer(spl_token_transfer_row) => {
-                    insert_spl_token_transfers.write(&spl_token_transfer_row).await?;
-                }
+                IndexerRow::SplTokenTransfer(row) => insert_spl_token_transfers.write(&row).await?,
+                IndexerRow::Block(row) => insert_blocks.write(&row).await?,
                 _ => (),
             }
         }
         insert_spl_token_transfers.end().await?;
-        println!("Inserted transfer rows");
+        println!("Inserted rows into spl_token_transfers table");
+        insert_blocks.end().await?;
+        println!("Inserted rows into blocks table");
 
         Ok(())
     }
